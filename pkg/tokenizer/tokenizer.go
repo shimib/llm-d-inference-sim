@@ -17,6 +17,7 @@ limitations under the License.
 package tokenizer
 
 import (
+	"container/list"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -50,13 +51,27 @@ type baseTokenizer struct {
 	re *regexp.Regexp
 }
 
+// reverseMapCapacity bounds the detokenization reverse map. At roughly a
+// hundred bytes per entry the map stays within tens of MB when full.
+const reverseMapCapacity = 1 << 18
+
+type reverseMapEntry struct {
+	id  uint32
+	str string
+}
+
 type SimpleTokenizer struct {
 	baseTokenizer
 
-	// idToString reverses the one-way token-id hashes for Detokenize; it
-	// only contains ids this instance has produced
-	mu         sync.RWMutex
-	idToString map[uint32]string
+	// idToEntry and evictionOrder reverse the one-way token-id hashes for
+	// Detokenize. Only ids this instance has produced are present, at most
+	// capacity of them; when full, the least recently encoded ids are
+	// evicted. Lookups do not refresh recency, so Detokenize only takes the
+	// read lock.
+	mu            sync.RWMutex
+	idToEntry     map[uint32]*list.Element
+	evictionOrder *list.List
+	capacity      int
 }
 
 // New builds a Tokenizer based on the simulator configuration.
@@ -118,7 +133,16 @@ func (bt *baseTokenizer) splitIntoTokens(input string, count int) []string {
 
 // Simple Tokenizer
 func NewSimpleTokenizer() *SimpleTokenizer {
-	return &SimpleTokenizer{baseTokenizer: newBaseTokenizer(), idToString: map[uint32]string{}}
+	return newSimpleTokenizerWithCapacity(reverseMapCapacity)
+}
+
+func newSimpleTokenizerWithCapacity(capacity int) *SimpleTokenizer {
+	return &SimpleTokenizer{
+		baseTokenizer: newBaseTokenizer(),
+		idToEntry:     map[uint32]*list.Element{},
+		evictionOrder: list.New(),
+		capacity:      capacity,
+	}
 }
 
 func (st *baseTokenizer) tokenize(input string) ([]uint32, []string) {
@@ -133,7 +157,17 @@ func (st *SimpleTokenizer) tokenize(input string) ([]uint32, []string) {
 	tokens, strTokens := st.baseTokenizer.tokenize(input)
 	st.mu.Lock()
 	for i, id := range tokens {
-		st.idToString[id] = strTokens[i]
+		if elem, ok := st.idToEntry[id]; ok {
+			elem.Value.(*reverseMapEntry).str = strTokens[i]
+			st.evictionOrder.MoveToFront(elem)
+			continue
+		}
+		st.idToEntry[id] = st.evictionOrder.PushFront(&reverseMapEntry{id: id, str: strTokens[i]})
+		if st.evictionOrder.Len() > st.capacity {
+			oldest := st.evictionOrder.Back()
+			st.evictionOrder.Remove(oldest)
+			delete(st.idToEntry, oldest.Value.(*reverseMapEntry).id)
+		}
 	}
 	st.mu.Unlock()
 	return tokens, strTokens
@@ -152,8 +186,8 @@ func (st *SimpleTokenizer) Detokenize(tokenIDs []uint32) (string, error) {
 	st.mu.RLock()
 	defer st.mu.RUnlock()
 	for _, id := range tokenIDs {
-		if s, ok := st.idToString[id]; ok {
-			builder.WriteString(s)
+		if elem, ok := st.idToEntry[id]; ok {
+			builder.WriteString(elem.Value.(*reverseMapEntry).str)
 		} else {
 			fmt.Fprintf(&builder, "<unk_%d>", id)
 		}

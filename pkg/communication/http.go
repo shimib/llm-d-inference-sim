@@ -187,7 +187,7 @@ func (c *Communication) handleRender(req endpoint.RenderableRequest, respBuilder
 		c.sendError(ctx, err, false)
 		return
 	}
-	if err := c.runtime.ValidateBaseModel(req.GetModel()); err != nil {
+	if err := c.runtime.ValidateBaseModel(req.GetModel(), "render"); err != nil {
 		c.sendError(ctx, err, false)
 		return
 	}
@@ -235,7 +235,7 @@ func (c *Communication) handleDerender(req endpoint.DerenderableRequest, ctx *fa
 	}
 	// an empty model means the served model, matching vLLM
 	if model := req.GetModel(); model != "" {
-		if err := c.runtime.ValidateBaseModel(model); err != nil {
+		if err := c.runtime.ValidateBaseModel(model, "derender"); err != nil {
 			c.sendError(ctx, err, false)
 			return
 		}

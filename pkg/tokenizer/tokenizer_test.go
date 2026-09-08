@@ -19,6 +19,7 @@ package tokenizer
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"time"
 
@@ -109,6 +110,43 @@ var _ = Describe("tokenizer", func() {
 		output, err := st.Detokenize([]uint32{12345})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(output).To(Equal("<unk_12345>"))
+	})
+
+	It("should evict the least recently encoded ids when the reverse map is full", func() {
+		st := newSimpleTokenizerWithCapacity(2)
+		oldIDs, _, err := st.RenderText("aaa")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(oldIDs).To(HaveLen(1))
+
+		newIDs, _, err := st.RenderText("bbb ccc")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(newIDs).To(HaveLen(2))
+		Expect(st.evictionOrder.Len()).To(Equal(2))
+
+		output, err := st.Detokenize(oldIDs)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(output).To(Equal(fmt.Sprintf("<unk_%d>", oldIDs[0])))
+
+		output, err = st.Detokenize(newIDs)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(output).To(Equal("bbb ccc"))
+	})
+
+	It("should keep re-encoded ids when the reverse map is full", func() {
+		st := newSimpleTokenizerWithCapacity(2)
+		keptIDs, _, err := st.RenderText("aaa bbb")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(keptIDs).To(HaveLen(2))
+
+		// re-encoding "bbb" (string tokens keep trailing whitespace, so it
+		// must stay last) refreshes it, making "aaa " the eviction victim
+		_, _, err = st.RenderText("ccc bbb")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(st.evictionOrder.Len()).To(Equal(2))
+
+		output, err := st.Detokenize(keptIDs)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(output).To(Equal(fmt.Sprintf("<unk_%d>bbb", keptIDs[0])))
 	})
 
 	It("should detokenize with real tokenizer", func() {
